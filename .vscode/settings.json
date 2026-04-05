@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "*.dbclient-js": "javascript",
+        "queue": "cpp",
+        "stack": "cpp",
+        "unordered_set": "cpp"
+    }
+}
