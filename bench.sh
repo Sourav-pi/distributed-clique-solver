@@ -41,7 +41,7 @@ SEQ_BIN="./seq"
 MPI_BIN="./main"
 
 # Extra mpirun flags (add --oversubscribe if you want more procs than cores)
-MPIRUN_FLAGS=""
+MPIRUN_FLAGS="--mca opal_warn_on_missing_libcuda 0"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

@@ -37,7 +37,7 @@ static int task_own_pmax = 0;  // best profit found by THIS worker itself, not a
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 bool ratio_cmp(const Node& a, const Node& b) {
-    return (double)a.profit / a.cost < (double)b.profit / b.cost;
+    return (double)a.profit / a.cost > (double)b.profit / b.cost;
 }
 
 void drain_pmax_updates() {
@@ -107,7 +107,7 @@ int get_greedy_bound(const int* cand, int cand_sz) {
 
 int get_knapsack_bound(const int* cand, int cand_sz, int rem) {
     long long total = 0;
-    for (int i = cand_sz-1; i >= 0; --i) {
+    for (int i = 0; i < cand_sz; ++i) {
         int v = cand[i];
         if (nodes[v].cost <= rem) {
             total += nodes[v].profit;
@@ -131,19 +131,19 @@ void findClique(const int* cand, int cand_sz, vector<int>& cur, int pc, int wc) 
         }
         return;
     }
-    if (pc + get_knapsack_bound(cand, cand_sz, B - wc) <= Pmax) return;
     if (pc + get_greedy_bound(cand, cand_sz) <= Pmax) return;
+    if (pc + get_knapsack_bound(cand, cand_sz, B - wc) <= Pmax) return;
 
-    // FIX 1B: Iterate forward to branch on best candidates first!
     for (int i = 0; i < cand_sz; ++i) {
         int v = cand[i];
         if (wc + nodes[v].cost <= B) {
             int nc[MAXN], nc_sz = 0;
-            // FIX 1C: Only pass candidates WORSE than the current one (j > i) to break symmetry
             for (int j = i + 1; j < cand_sz; ++j) {
                 if (adj[v].test(cand[j])) nc[nc_sz++] = cand[j];
             }
             cur.push_back(v);
+            if (pc + nodes[v].profit > Pmax)
+                worker_update_pmax(pc + nodes[v].profit, cur);
             findClique(nc, nc_sz, cur, pc + nodes[v].profit, wc + nodes[v].cost);
             cur.pop_back();
         }
@@ -192,11 +192,9 @@ vector<int> read_and_broadcast(const char* path, int rank) {
 
 static void build_sub(int root, const vector<int>& initial_cand, int* sub, int& sub_sz) {
     sub_sz = 0;
-    bool found_root = false;
-    // FIX 1A: Only collect neighbors that appear AFTER the root in initial_cand
     for (int u : initial_cand) {
-        if (u == root) { found_root = true; continue; } 
-        if (found_root && adj[root].test(u)) sub[sub_sz++] = u;
+        if (u == root) break;
+        if (adj[root].test(u)) sub[sub_sz++] = u;
     }
 }
 
@@ -225,8 +223,14 @@ int main(int argc, char** argv) {
     vector<int> initial_cand = read_and_broadcast(argv[1], rank);
 
     if (size == 1) {
-        vector<int> cur;
-        findClique(initial_cand.data(), (int)initial_cand.size(), cur, 0, 0);
+        int sub[MAXN], sub_sz;
+        for (int root : initial_cand) {
+            int pc = nodes[root].profit, wc = nodes[root].cost;
+            build_sub(root, initial_cand, sub, sub_sz);
+            if (pc > Pmax) worker_update_pmax(pc, {root});
+            vector<int> cur = {root};
+            findClique(sub, sub_sz, cur, pc, wc);
+        }
         write_output(argv[2]);
         fprintf(stderr, "Time: %.3f s\n", MPI_Wtime() - t0);
         MPI_Finalize();
