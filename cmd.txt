@@ -1,0 +1,4 @@
+qsub -I -P col7880.cs1230751.course -N test -l select=1:ncpus=4:mpiprocs=4:ngpus=1
+module purge
+module load compiler/gcc/9.1.0
+module load compiler/gcc/9.1/openmpi/4.1.2
