@@ -1,7 +1,6 @@
 CXX      = g++
 MPICXX   = mpic++
-CXXFLAGS = -O3 -std=c++17
-
+CXXFLAGS = -O3 -std=gnu++11
 all: seq main
 
 seq: seq.cpp

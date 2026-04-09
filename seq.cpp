@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <bitset>
+#include <cstdio>
 
 using namespace std;
 

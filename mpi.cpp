@@ -1,197 +1,352 @@
-#include<bits/stdc++.h>
-#include<mpi.h>
+#include <bits/stdc++.h>
+#include <mpi.h>
+
 using namespace std;
 
-struct node {
-    int idx;
-    int p;
-    int c;
+// ── Constants ─────────────────────────────────────────────────────────────────
+const int MAXN = 1200;
+
+const int TAG_WORK        = 1;  
+const int TAG_RESULT      = 2;  
+const int TAG_DONE        = 3;  
+const int TAG_PMAX        = 4;  
+const int TAG_UPDATE_PMAX = 5;  
+
+const int CHECK_INTERVAL = 500;
+
+const int WORK_BUF = 2;
+const int RES_BUF  = 2 + MAXN;  
+
+// ── Data ──────────────────────────────────────────────────────────────────────
+struct Node {
+    int profit, cost, index;
 };
 
-static int      NWORDS;
-static vector<vector<uint64_t>> adj;
+int N, B, E;
+bitset<MAXN> adj[MAXN];
+Node nodes[MAXN];
+int Pmax = 0;
+vector<int> best_clique;
 
-inline bool isAdj(int u, int v) {
-    return (adj[u][v >> 6] >> (v & 63)) & 1;
+int color_max_p[MAXN];
+bitset<MAXN> forbidden_colors[MAXN]; 
+
+static int call_count = 0;
+static bool is_worker = false;
+static int task_own_pmax = 0;  // best profit found by THIS worker itself, not adopted from broadcasts
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+bool ratio_cmp(const Node& a, const Node& b) {
+    return (double)a.profit / a.cost < (double)b.profit / b.cost;
 }
-inline void addEdge(int u, int v) {
-    adj[u][v >> 6] |= 1ULL << (v & 63);
-    adj[v][u >> 6] |= 1ULL << (u & 63);
-}
 
-int greedyBound(vector<node>& nodes) {
-    sort(nodes.begin(), nodes.end(),
-         [](const node& a, const node& b){ return a.p > b.p; });
-
-    vector<vector<uint64_t>> colorBits;
-    vector<int>              maxP;
-
-    for (const node& nd : nodes) {
-        bool placed = false;
-        for (int c = 0; c < (int)colorBits.size(); c++) {
-            bool indep = true;
-            for (int w = 0; w < NWORDS; w++) {
-                if (adj[nd.idx][w] & colorBits[c][w]) { indep = false; break; }
-            }
-            if (indep) {
-                colorBits[c][nd.idx >> 6] |= 1ULL << (nd.idx & 63);
-                maxP[c] = max(maxP[c], nd.p);
-                placed = true;
-                break;
-            }
+void drain_pmax_updates() {
+    int flag, np;
+    do {
+        MPI_Iprobe(0, TAG_PMAX, MPI_COMM_WORLD, &flag, MPI_STATUS_IGNORE);
+        if (flag) {
+            MPI_Recv(&np, 1, MPI_INT, 0, TAG_PMAX, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            if (np > Pmax) Pmax = np;
         }
-        if (!placed) {
-            colorBits.emplace_back(NWORDS, 0ULL);
-            colorBits.back()[nd.idx >> 6] |= 1ULL << (nd.idx & 63);
-            maxP.push_back(nd.p);
+    } while (flag);
+}
+
+void worker_update_pmax(int new_pmax, const vector<int>& clique) {
+    Pmax = new_pmax;
+    task_own_pmax = new_pmax;  // record that WE found this, not a broadcast
+    best_clique = clique;
+    if (is_worker) {
+        // Only send the bound — clique is delivered with TAG_RESULT when the task finishes
+        MPI_Send(&Pmax, 1, MPI_INT, 0, TAG_UPDATE_PMAX, MPI_COMM_WORLD);
+    }
+}
+
+// ── Bounds ────────────────────────────────────────────────────────────────────
+int get_greedy_bound(const int* cand, int cand_sz) {
+    if (cand_sz == 0) return 0;
+    
+    int sorted_cand[MAXN];
+    memcpy(sorted_cand, cand, cand_sz * sizeof(int));
+    
+    sort(sorted_cand, sorted_cand + cand_sz, [](int a, int b) {
+        if (nodes[a].profit != nodes[b].profit)
+            return nodes[a].profit > nodes[b].profit;
+        return a < b; 
+    });
+
+    int max_c = -1; 
+    
+    for (int i = 0; i < cand_sz; ++i) {
+        int u = sorted_cand[i];
+        int c = 0;
+        
+
+        while (forbidden_colors[c].test(u)) {
+            c++;
+        }
+        
+        forbidden_colors[c] |= adj[u];
+        
+        if (c > max_c) {
+            max_c = c;
+            color_max_p[c] = nodes[u].profit;
+        } else {
+            color_max_p[c] = max(color_max_p[c], nodes[u].profit);
         }
     }
-
-    int sm = 0;
-    for (int x : maxP) sm += x;
-    return sm;
+    
+    int bound = 0;
+    for (int c = 0; c <= max_c; ++c) {
+        bound += color_max_p[c];
+        color_max_p[c] = 0;       
+        forbidden_colors[c].reset(); // Clean up fast
+    }
+    
+    return bound;
 }
 
-int resourceBound(vector<node>& nodes, int b) {
-    sort(nodes.begin(), nodes.end(),
-         [](const node& a, const node& b){
-             return (double)a.p / a.c > (double)b.p / b.c;
-         });
-    int left = b, profit = 0, partial = -1;
-    for (int i = 0; i < (int)nodes.size(); i++) {
-        if (left - nodes[i].c >= 0) {
-            left   -= nodes[i].c;
-            profit += nodes[i].p;
+int get_knapsack_bound(const int* cand, int cand_sz, int rem) {
+    long long total = 0;
+    for (int i = cand_sz-1; i >= 0; --i) {
+        int v = cand[i];
+        if (nodes[v].cost <= rem) {
+            total += nodes[v].profit;
+            rem -= nodes[v].cost;
         } else {
-            partial = i;
+            total += (1LL * nodes[v].profit * rem) / nodes[v].cost;
             break;
         }
     }
-    if (partial != -1)
-        profit += (1LL * left * nodes[partial].p + nodes[partial].c - 1)
-                  / nodes[partial].c;
-    return profit;
+    return (int)total;
 }
 
-vector<node> inters(const vector<node>& Ccand, int nd_idx) {
-    vector<node> opt;
-    opt.reserve(Ccand.size());
-    for (const auto& cnd : Ccand)
-        if (isAdj(nd_idx, cnd.idx))
-            opt.push_back(cnd);
-    return opt;
-}
+// ── Branch and Bound ──────────────────────────────────────────────────────────
+void findClique(const int* cand, int cand_sz, vector<int>& cur, int pc, int wc) {
+    if (is_worker && (++call_count % CHECK_INTERVAL == 0))
+        drain_pmax_updates();
 
-static int          Pmax = 0;
-static vector<node> max_cliche;
-static vector<node> cur_clique;
+    if (cand_sz == 0) {
+        if (pc > Pmax) {
+            worker_update_pmax(pc, cur);
+        }
+        return;
+    }
+    if (pc + get_knapsack_bound(cand, cand_sz, B - wc) <= Pmax) return;
+    if (pc + get_greedy_bound(cand, cand_sz) <= Pmax) return;
 
-void findCliche(vector<node> Ccand, int Pcur, int Wcur, int b) {
-    int Ugreedy = greedyBound(Ccand);
-    if (Pcur + Ugreedy   <= Pmax) return;
-    int Uresource = resourceBound(Ccand, b - Wcur);
-    if (Pcur + Uresource <= Pmax) return;
-
-    while (!Ccand.empty()) {
-        node nd = Ccand.back();
-        Ccand.pop_back();
-        if (Wcur + nd.c <= b) {
-            if (Pmax < Pcur + nd.p) {
-                Pmax       = Pcur + nd.p;
-                max_cliche = cur_clique;
-                max_cliche.push_back(nd);
+    // FIX 1B: Iterate forward to branch on best candidates first!
+    for (int i = 0; i < cand_sz; ++i) {
+        int v = cand[i];
+        if (wc + nodes[v].cost <= B) {
+            int nc[MAXN], nc_sz = 0;
+            // FIX 1C: Only pass candidates WORSE than the current one (j > i) to break symmetry
+            for (int j = i + 1; j < cand_sz; ++j) {
+                if (adj[v].test(cand[j])) nc[nc_sz++] = cand[j];
             }
-            auto Cnext = inters(Ccand, nd.idx);
-            cur_clique.push_back(nd);
-            findCliche(std::move(Cnext), Pcur + nd.p, Wcur + nd.c, b);
-            cur_clique.pop_back();
+            cur.push_back(v);
+            findClique(nc, nc_sz, cur, pc + nodes[v].profit, wc + nodes[v].cost);
+            cur.pop_back();
         }
     }
 }
 
+// ── I/O ───────────────────────────────────────────────────────────────────────
+vector<int> read_and_broadcast(const char* path, int rank) {
+    int profits[MAXN] = {}, costs[MAXN] = {};
 
-int main(int argc, char* argv[]) {
+    if (rank == 0) {
+        FILE* f = fopen(path, "r");
+        if (!f) { fprintf(stderr, "Cannot open input file: %s\n", path); MPI_Abort(MPI_COMM_WORLD, 1); }
+        fscanf(f, "%d %d %d", &N, &E, &B);
+        for (int i = 0; i < N; i++)
+            fscanf(f, "%d %d", &profits[i], &costs[i]);
+        for (int i = 0; i < E; i++) {
+            int u, v;
+            fscanf(f, "%d %d", &u, &v);
+            adj[u].set(v);
+            adj[v].set(u);
+        }
+        fclose(f);
+    }
+
+    int hdr[3] = {N, E, B};
+    MPI_Bcast(hdr, 3, MPI_INT, 0, MPI_COMM_WORLD);
+    N = hdr[0]; E = hdr[1]; B = hdr[2];
+
+    MPI_Bcast(profits, N, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(costs, N, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(adj, N * sizeof(adj[0]), MPI_BYTE, 0, MPI_COMM_WORLD);
+
+    vector<Node> tmp(N);
+    for (int i = 0; i < N; i++) {
+        tmp[i] = {profits[i], costs[i], i};
+    }
+    sort(tmp.begin(), tmp.end(), ratio_cmp);
+    vector<int> cand;
+    for (int i = 0; i < N; i++) {
+        nodes[tmp[i].index] = tmp[i];
+        cand.push_back(tmp[i].index);
+    }
+    return cand;
+}
+
+static void build_sub(int root, const vector<int>& initial_cand, int* sub, int& sub_sz) {
+    sub_sz = 0;
+    bool found_root = false;
+    // FIX 1A: Only collect neighbors that appear AFTER the root in initial_cand
+    for (int u : initial_cand) {
+        if (u == root) { found_root = true; continue; } 
+        if (found_root && adj[root].test(u)) sub[sub_sz++] = u;
+    }
+}
+
+void write_output(const char* path) {
+    sort(best_clique.begin(), best_clique.end());
+    ofstream out(path);
+    out << Pmax << '\n';
+    for (int id : best_clique) out << id << ' ';
+    out << '\n';
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+int main(int argc, char** argv) {
     MPI_Init(&argc, &argv);
+    double t0 = MPI_Wtime();
+
     int rank, size;
-    double st = MPI_Wtime();
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-    if (argc != 3) { MPI_Finalize(); return -1; }
-
-    ifstream infile(argv[1]);
-    if (!infile.is_open()) { MPI_Finalize(); return -1; }
-
-    int n, m, b;
-    infile >> n >> m >> b;
-
-    NWORDS = (n + 63) / 64;
-    adj.assign(n, vector<uint64_t>(NWORDS, 0ULL));
-
-    vector<node> nodes(n);
-    for (int i = 0; i < n; i++) {
-        nodes[i].idx = i;
-        infile >> nodes[i].p >> nodes[i].c;
+    if (argc < 3) {
+        MPI_Finalize();
+        return -1;
     }
-    for (int i = 0; i < m; i++) {
-        int u, v; infile >> u >> v;
-        addEdge(u, v);
+
+    vector<int> initial_cand = read_and_broadcast(argv[1], rank);
+
+    if (size == 1) {
+        vector<int> cur;
+        findClique(initial_cand.data(), (int)initial_cand.size(), cur, 0, 0);
+        write_output(argv[2]);
+        fprintf(stderr, "Time: %.3f s\n", MPI_Wtime() - t0);
+        MPI_Finalize();
+        return 0;
     }
-    infile.close();
 
-    int local_lb = 0;
-    for (const auto& nd : nodes)
-        if (nd.c <= b) local_lb = max(local_lb, nd.p);
-    MPI_Allreduce(&local_lb, &Pmax, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+    int total = (int)initial_cand.size();
 
-    for (int i = n - 1; i >= 0; i--) {
-        if (i % size != rank) continue;
+    // ── MASTER (rank 0) ───────────────────────────────────────────────────────
+    if (rank == 0) {
+        int sent = 0, active = 0;
+        int workers = size - 1;
+        int wbuf[WORK_BUF], rbuf[RES_BUF];
+        set<int> active_set;
 
-        node nd = nodes[i];
-        if (nd.c > b) continue;
+        auto send_task = [&](int w, int ti) {
+            wbuf[0] = Pmax;
+            wbuf[1] = initial_cand[ti];
+            MPI_Send(wbuf, WORK_BUF, MPI_INT, w, TAG_WORK, MPI_COMM_WORLD);
+            active_set.insert(w);
+        };
 
-        if (Pmax < nd.p) {
-            Pmax       = nd.p;
-            max_cliche = {nd};
+        for (int w = 1; w <= workers; w++) {
+            if (sent < total) {
+                send_task(w, sent++);
+                active++;
+            } else {
+                MPI_Send(nullptr, 0, MPI_INT, w, TAG_DONE, MPI_COMM_WORLD);
+            }
         }
 
-        vector<node> sub_Ccand;
-        sub_Ccand.reserve(i);
-        for (int j = 0; j < i; j++)
-            if (isAdj(nd.idx, nodes[j].idx))
-                sub_Ccand.push_back(nodes[j]);
+        while (active > 0) {
+            MPI_Status st;
+            MPI_Recv(rbuf, RES_BUF, MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &st);
 
-        cur_clique.push_back(nd);
-        findCliche(std::move(sub_Ccand), nd.p, nd.c, b);
-        cur_clique.pop_back();
+            int w = st.MPI_SOURCE;
+
+            if (st.MPI_TAG == TAG_UPDATE_PMAX) {
+                // Live bound update: only Pmax, no clique — just tighten the bound
+                int wpmax = rbuf[0];
+                if (wpmax > Pmax) {
+                    Pmax = wpmax;
+                    for (int aw : active_set) {
+                        if (aw != w) MPI_Send(&Pmax, 1, MPI_INT, aw, TAG_PMAX, MPI_COMM_WORLD);
+                    }
+                }
+                continue; // worker is still running, don't assign new work
+            }
+
+            // TAG_RESULT: worker finished its task and sends its final Pmax + clique
+            int wpmax = rbuf[0], csz = rbuf[1];
+            int old_pmax = Pmax;
+            if (wpmax > Pmax) Pmax = wpmax;
+            // Update best_clique only when this result carries a valid clique at the best known profit
+            if (csz > 0 && wpmax == Pmax) {
+                best_clique.assign(rbuf + 2, rbuf + 2 + csz);
+            }
+            if (Pmax > old_pmax) {
+                for (int aw : active_set) {
+                    if (aw != w) MPI_Send(&Pmax, 1, MPI_INT, aw, TAG_PMAX, MPI_COMM_WORLD);
+                }
+            }
+
+            active--;
+            active_set.erase(w);
+
+            if (sent < total) {
+                send_task(w, sent++);
+                active++;
+            } else {
+                MPI_Send(nullptr, 0, MPI_INT, w, TAG_DONE, MPI_COMM_WORLD);
+            }
+        }
+
+        write_output(argv[2]);
+        
+        // ── WORKER (rank > 0) ─────────────────────────────────────────────────────
+    } else {
+        is_worker = true;
+        int wbuf[WORK_BUF], rbuf[RES_BUF];
+        
+        while (true) {
+            MPI_Status st;
+            MPI_Recv(wbuf, WORK_BUF, MPI_INT, 0, MPI_ANY_TAG, MPI_COMM_WORLD, &st);
+            
+            if (st.MPI_TAG == TAG_DONE) break;
+            
+            if (st.MPI_TAG == TAG_PMAX) {
+                Pmax = max(Pmax, wbuf[0]);
+                continue;
+            }
+            
+            Pmax = max(Pmax, wbuf[0]);
+            task_own_pmax = 0;   // reset: only count what this task finds itself
+            best_clique.clear();
+            int root = wbuf[1];
+            int pc = nodes[root].profit;
+            int wc = nodes[root].cost;
+
+            int sub[MAXN], sub_sz;
+            build_sub(root, initial_cand, sub, sub_sz);
+
+            if (pc > Pmax) {
+                worker_update_pmax(pc, {root});
+            }
+
+            call_count = 0;
+            vector<int> cur = {root};
+            findClique(sub, sub_sz, cur, pc, wc);
+
+            // Send task_own_pmax (not broadcast-inflated Pmax) so master can match clique to profit
+            rbuf[0] = task_own_pmax;
+            rbuf[1] = (int)best_clique.size();
+            for (int i = 0; i < (int)best_clique.size(); i++)
+                rbuf[2 + i] = best_clique[i];
+            MPI_Send(rbuf, 2 + (int)best_clique.size(), MPI_INT, 0, TAG_RESULT, MPI_COMM_WORLD);
+        }
     }
-
-    int global_Pmax;
-    MPI_Allreduce(&Pmax, &global_Pmax, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
-
-    int my_candidate = (Pmax == global_Pmax) ? rank : size;
-    int winner_rank;
-    MPI_Allreduce(&my_candidate, &winner_rank, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
-
-    int clique_size = (rank == winner_rank) ? (int)max_cliche.size() : 0;
-    MPI_Bcast(&clique_size, 1, MPI_INT, winner_rank, MPI_COMM_WORLD);
-
-    vector<int> clique_ids(clique_size);
-    if (rank == winner_rank)
-        for (int i = 0; i < clique_size; i++) clique_ids[i] = max_cliche[i].idx;
-    MPI_Bcast(clique_ids.data(), clique_size, MPI_INT, winner_rank, MPI_COMM_WORLD);
-
-    if (rank == 0) {
-        sort(clique_ids.begin(), clique_ids.end());
-        ofstream outfile(argv[2]);
-        if (!outfile.is_open()) { MPI_Finalize(); return -1; }
-        outfile << global_Pmax << '\n';
-        for (int id : clique_ids) outfile << id << ' ';
-        outfile << '\n';
-    }
-
+    
+    if(rank==0) fprintf(stderr, "MPI Time: %.3f s\n", MPI_Wtime() - t0);
     MPI_Finalize();
-
-    cout << "MPI Time : " << MPI_Wtime()-st << " s\n";
     return 0;
 }
