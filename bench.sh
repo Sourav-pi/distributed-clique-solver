@@ -19,14 +19,22 @@ set -euo pipefail
 MPI_PROCS=(1 2 4 8)
 
 # Test cases: "name n density max_p max_c budget seed"
-# density 0.5 near the clique threshold → hardest for B&B
-# Adjust n upward if runs finish too quickly on your machine.
+#
+# Constraints (matching assignment spec):
+#   10  <= N          <= 1200
+#   0   <= E          <= N*(N-1)/2   (density controls E)
+#   10  <= B          <= 1000
+#   1   <= p(v), c(v) <= 100         → max_p=100, max_c=100
+#
+# density=0.5 is hardest for B&B (clique threshold for random graphs).
+# Budget is set so ~8-12 nodes can fit on average (budget / avg_cost ≈ budget/50).
+# If any test finishes in <1s on your machine, increase n by 50-100.
 declare -a TESTS=(
-    "tiny        15  0.60  100  20   40   42"   # sanity / correctness check
-    "small_dense 25  0.50  100  20   60   123"  # medium difficulty
-    "med_dense   35  0.50  100  20   80   456"  # main timing test
-    "large_dense 45  0.55  100  20  100   789"  # heavier
-    "sparse      80  0.20  100  20  150   321"  # sparse graph
+    "small   300  0.50  100  100  500   42"   # correctness + light timing
+    "medium  400  0.50  100  100  600   42"   # moderate load
+    "large   600  0.50  100  100  750   42"   # main scaling test
+    "xlarge  800  0.50  100  100  900   42"   # heavier
+    "xxlarge 1000 0.50  100  100  1000  42"   # stress / near upper bound
 )
 
 SEQ_BIN="./seq"

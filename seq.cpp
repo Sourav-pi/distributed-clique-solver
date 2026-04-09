@@ -1,146 +1,159 @@
-#include<bits/stdc++.h>
+#include <iostream>
+#include <vector>
+#include <algorithm>
+#include <chrono>
+#include <bitset>
+
 using namespace std;
 
-struct node {
-    int idx;
-    int p;
-    int c;
+const int MAXN = 1200;
+
+struct Node {
+    int profit;
+    int cost;
+    int index;
 };
 
-bool check(const set<int>& st, const unordered_set<int>& neis){
-    for(auto nei: neis){
-        if(st.count(nei)) return false;
-    }
-    return true;
+int N, B, E;
+bitset<MAXN> adj[MAXN];
+Node nodes[MAXN];
+int Pmax = 0;
+vector<int> best_clique;
 
+// Pre-allocated buffers to avoid repeated allocation in recursion
+int color_max_p[MAXN]; 
+int node_colors[MAXN];
+
+// Heuristic: Higher profit-to-cost ratio nodes explored first to find better Pmax quickly
+bool ratio_comparator(const Node& a, const Node& b) {
+    return (double)a.profit / a.cost > (double)b.profit / b.cost;
 }
 
-int greedyBound(vector<node>& nodes,vector<unordered_set<int>>& adj) {
-    sort(nodes.begin(),nodes.end(),[](const node& node1,const node& node2){return node1.p > node2.p;});
-    vector<set<int>> colorset;
-    vector<int> max_elem;
-    for(node& nd : nodes){
-        int found = 0;
-        for(int color=0;color<colorset.size();color++){
-            if(check(colorset[color],adj[nd.idx])){
-                found=1;
-                colorset[color].insert(nd.idx);
-                max_elem[color]=max(max_elem[color],nd.p);
-                break;
+// Optimized Greedy Coloring using bitset and array
+int get_greedy_bound(const vector<int>& cand) {
+    if (cand.empty()) return 0;
+
+    int max_c = 0;
+    for (int i = 0; i < cand.size(); ++i) {
+        int u = cand[i];
+        bitset<MAXN> used_colors;
+        
+        for (int j = 0; j < i; ++j) {
+            if (adj[u].test(cand[j])) {
+                used_colors.set(node_colors[j]);
             }
         }
-        if(!found){
-            set<int> s;
-            s.insert(nd.idx);
-            colorset.push_back(s);
-            max_elem.push_back(nd.p);
-        } 
+
+        int c = 0;
+        while (used_colors.test(c)) c++;
+        node_colors[i] = c;
+        
+        if (c > max_c) {
+            max_c = c;
+            color_max_p[c] = nodes[u].profit;
+        } else {
+            color_max_p[c] = max(color_max_p[c], nodes[u].profit);
+        }
     }
-    int sm = 0;
-    for(auto x:max_elem) sm+=x;
-    return sm;
+
+    int bound = 0;
+    for (int i = 0; i <= max_c; ++i) {
+        bound += color_max_p[i];
+        color_max_p[i] = 0; // Clean up for next call
+    }
+    return bound;
 }
 
-int resourceBound(vector<node>& nodes,int b){
-    sort(nodes.begin(),nodes.end(),[](const node& node1,const node& node2){return (double)node1.p/(double)node1.c > (double)node2.p/(double)node2.c;});
-    int left = b;
-    int profit = 0;
-    int partial = -1;
-    for(int i=0;i<nodes.size();i++){
-        node& nd = nodes[i];
-        if(left-nd.c >= 0) {
-            left-=nd.c;
-            profit+=nd.p;
+// Fast Fractional Knapsack Upper Bound
+int get_knapsack_bound(const vector<int>& cand, int rem_B) {
+    double total_p = 0;
+    for (int idx : cand) {
+        if (nodes[idx].cost <= rem_B) {
+            total_p += nodes[idx].profit;
+            rem_B -= nodes[idx].cost;
         } else {
-            partial=i;
+            total_p += (double)nodes[idx].profit / nodes[idx].cost * rem_B;
             break;
         }
     }
-    if(partial!=-1){
-        profit+=(1LL*left*nodes[partial].p+(nodes[partial].c-1))/(1LL*nodes[partial].c);
-    }
-    return profit;
+    return (int)total_p;
 }
 
-vector<node> inters(vector<node>& Ccand,unordered_set<int> neis){
-    vector<node> opt;
-    for(auto cnd: Ccand){
-        if(neis.count(cnd.idx)) opt.push_back(cnd);
+void findClique_seq(vector<int> cand, vector<int>& current_clique, int pcurr, int wcurr) {
+    if (cand.empty()) {
+        if (pcurr > Pmax) {
+            Pmax = pcurr;
+            best_clique = current_clique;
+        }
+        return;
     }
-    return opt;
 
-}
+    // Bound 1: Knapsack (Fast)
+    if (pcurr + get_knapsack_bound(cand, B - wcurr) <= Pmax) return;
 
-static int Pmax = 0;
-static vector<node> max_cliche;
-static vector<node> cur_clique;
+    // Bound 2: Coloring (Tight)
+    if (pcurr + get_greedy_bound(cand) <= Pmax) return;
 
-void findCliche(vector<node> Ccand,int Pcur,int Wcur,vector<unordered_set<int>>& adj,int b) {
-    int Ugreedy = greedyBound(Ccand,adj);
-    if(Pcur+Ugreedy <= Pmax) return;
-    int Uresource = resourceBound(Ccand,b-Wcur);
-    if(Pcur+Uresource <= Pmax) return;
-    while(Ccand.size()!=0) {
-        node nd = Ccand[Ccand.size()-1];
-        Ccand.pop_back();
-        if(Wcur + nd.c <= b) {
-            if(Pmax<Pcur+nd.p){
-                Pmax=Pcur+nd.p;
-                max_cliche = cur_clique;
-                max_cliche.push_back(nd);
+    while (!cand.empty()) {
+        int v_idx = cand.back();
+        cand.pop_back();
+
+        if (wcurr + nodes[v_idx].cost <= B) {
+            vector<int> next_cand;
+            next_cand.reserve(cand.size());
+            
+            for (int u_idx : cand) {
+                if (adj[v_idx].test(u_idx)) {
+                    next_cand.push_back(u_idx);
+                }
             }
-            auto Cnext = inters(Ccand,adj[nd.idx]);
-            cur_clique.push_back(nd);
-            findCliche(Cnext,Pcur+nd.p,Wcur+nd.c,adj,b);
-            cur_clique.pop_back();
+
+            current_clique.push_back(v_idx);
+            findClique_seq(next_cand, current_clique, pcurr + nodes[v_idx].profit, wcurr + nodes[v_idx].cost);
+            current_clique.pop_back();
         }
     }
 }
 
+int main(int argc, char** argv) {
+    auto start = chrono::steady_clock::now();
+    if (argc < 2) return 1;
 
+    freopen(argv[1], "r", stdin);
+    if (scanf("%d %d %d", &N, &E, &B) != 3) return 1;
 
-
-int main(int argc, char const *argv[]) {
-    if(argc!=3) return -1;
-    string inpath = argv[1];
-    string outpath = argv[2];
-
-    // Take input
-    ifstream infile(inpath);
-
-    if(!infile.is_open()) return -1;
-    int n,m,b;
-    infile >> n >> m >> b;
-    vector<node> nodes(n);
-
-    vector<unordered_set<int>> adj(n);
-    for(int i=0;i<n;i++) {
-        nodes[i].idx = i;
-        infile >> nodes[i].p >> nodes[i].c;
-    }
-    int u,v;
-    for(int i=0;i<m;i++) {
-        infile >> u >> v;
-        adj[u].insert(v);
-        adj[v].insert(u);
+    vector<Node> temp_nodes(N);
+    for (int i = 0; i < N; i++) {
+        scanf("%d %d", &temp_nodes[i].profit, &temp_nodes[i].cost);
+        temp_nodes[i].index = i;
     }
 
-    // compute
-    findCliche(nodes,0,0,adj,b);
-    sort(max_cliche.begin(),max_cliche.end(),[](const node& node1,const node& node2){return node1.idx < node2.idx;});
-
-
-    // Write output
-    ofstream outfile(outpath);
-    if(outfile.is_open()){
-        outfile << Pmax << '\n';
-        for(auto nd:max_cliche){
-            outfile << nd.idx << " ";
-        }
-        outfile << '\n';
-    } else {
-        return -1;
+    for (int i = 0; i < E; i++) {
+        int u, v;
+        scanf("%d %d", &u, &v);
+        adj[u].set(v);
+        adj[v].set(u);
     }
 
+    // Sort globally by density to improve pruning efficiency
+    sort(temp_nodes.begin(), temp_nodes.end(), ratio_comparator);
+    
+    vector<int> initial_cand;
+    for (int i = 0; i < N; i++) {
+        nodes[temp_nodes[i].index] = temp_nodes[i];
+        initial_cand.push_back(temp_nodes[i].index);
+    }
+
+    vector<int> current_clique;
+    findClique_seq(initial_cand, current_clique, 0, 0);
+
+    freopen("output_sequential.txt", "w", stdout);
+    printf("%d\n", Pmax);
+    for (int i = 0; i < best_clique.size(); i++) {
+        printf("%d%c", best_clique[i], (i == best_clique.size() - 1 ? '\n' : ' '));
+    }
+
+    auto duration = chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now() - start);
+    fprintf(stderr, "Elapsed time: %lld ms\n", (long long)duration.count());
     return 0;
 }
