@@ -4,7 +4,7 @@
 using namespace std;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const int MAXN = 1200;
+const int MAXN = 1201;
 
 const int TAG_WORK        = 1;  
 const int TAG_RESULT      = 2;  
@@ -19,29 +19,21 @@ const int RES_BUF  = 2 + MAXN;
 
 // ── Data ──────────────────────────────────────────────────────────────────────
 struct Node {
-    int profit, cost, index;
+    int profit, cost, index; // 'index' holds the ORIGINAL node ID for output
 };
 
 int N, B, E;
-bitset<MAXN> adj[MAXN];
-Node nodes[MAXN];
+bitset<MAXN> adj[MAXN]; // Adjacency matrix using NEW sorted indices
+Node nodes[MAXN];       // Nodes sorted by ratio: nodes[0] is the best ratio
 int Pmax = 0;
-vector<int> best_clique;
+vector<int> best_clique; // Stores NEW sorted indices
 
 int color_max_p[MAXN];
 bitset<MAXN> forbidden_colors[MAXN]; 
 
-// FAST CACHE OPTIMIZATION: Flat integer array for O(1) rank lookups
-int profit_rank[MAXN];
-
 static int call_count = 0;
 static bool is_worker = false;
 static int task_own_pmax = 0;  
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-bool ratio_cmp(const Node& a, const Node& b) {
-    return (double)a.profit / a.cost > (double)b.profit / b.cost;
-}
 
 void drain_pmax_updates() {
     int flag, np;
@@ -64,19 +56,22 @@ void worker_update_pmax(int new_pmax, const vector<int>& clique) {
 }
 
 // ── Bounds ────────────────────────────────────────────────────────────────────
-int get_greedy_bound(const int* cand, int cand_sz) {
-    if (cand_sz == 0) return 0;
+int get_greedy_bound(const bitset<MAXN>& cand) {
+    if (cand.none()) return 0;
     
+    // Extract remaining candidates to sort them by absolute profit
     int sorted_cand[MAXN];
-    memcpy(sorted_cand, cand, cand_sz * sizeof(int));
+    int cand_sz = 0;
+    for (int v = cand._Find_first(); v < cand.size(); v = cand._Find_next(v)) {
+        sorted_cand[cand_sz++] = v;
+    }
     
-    // CACHE OPTIMIZATION: Sort using the L1-friendly integer array
+    // Sort by absolute profit for greedy coloring
     sort(sorted_cand, sorted_cand + cand_sz, [](int a, int b) {
-        return profit_rank[a] < profit_rank[b];
+        return nodes[a].profit > nodes[b].profit;
     });
 
     int max_c = -1; 
-    
     for (int i = 0; i < cand_sz; ++i) {
         int u = sorted_cand[i];
         int c = 0;
@@ -105,10 +100,11 @@ int get_greedy_bound(const int* cand, int cand_sz) {
     return bound;
 }
 
-int get_knapsack_bound(const int* cand, int cand_sz, int rem) {
+int get_knapsack_bound(const bitset<MAXN>& cand, int rem) {
     long long total = 0;
-    for (int i = 0; i < cand_sz; ++i) {
-        int v = cand[i];
+    // Because the graph is re-indexed, _Find_first() naturally iterates 
+    // from Best Ratio -> Worst Ratio. Exactly what Knapsack needs!
+    for (int v = cand._Find_first(); v < cand.size(); v = cand._Find_next(v)) {
         if (nodes[v].cost <= rem) {
             total += nodes[v].profit;
             rem -= nodes[v].cost;
@@ -121,112 +117,103 @@ int get_knapsack_bound(const int* cand, int cand_sz, int rem) {
 }
 
 // ── Branch and Bound ──────────────────────────────────────────────────────────
-void findClique(const int* cand, int cand_sz, vector<int>& cur, int pc, int wc) {
+// Pass 'cand' by value so we can mutate it locally without affecting backtracking
+void findClique(bitset<MAXN> cand, vector<int>& cur, int pc, int wc) {
     if (is_worker && (++call_count % CHECK_INTERVAL == 0))
         drain_pmax_updates();
 
-    if (cand_sz == 0) {
-        if (pc > Pmax) {
-            worker_update_pmax(pc, cur);
-        }
+    if (cand.none()) {
+        if (pc > Pmax) worker_update_pmax(pc, cur);
         return;
     }
     
-    // Original required ordering: Greedy, then Knapsack
-    if (pc + get_greedy_bound(cand, cand_sz) <= Pmax) return;
-    if (pc + get_knapsack_bound(cand, cand_sz, B - wc) <= Pmax) return;
+    if (pc + get_greedy_bound(cand) <= Pmax) return;
+    if (pc + get_knapsack_bound(cand, B - wc) <= Pmax) return;
 
-    for (int i = 0; i < cand_sz; ++i) {
-        int v = cand[i];
+    // GCC Hardware intrinsics to instantly jump to the next set bit (best ratio first)
+    for (int v = cand._Find_first(); v < cand.size(); v = cand._Find_next(v)) {
+        
+        // Remove 'v' from future siblings to break symmetry
+        cand.reset(v);
+
         if (wc + nodes[v].cost <= B) {
-            int nc[MAXN], nc_sz = 0;
-            
-            // Fast Neighbor Collection
-            const auto& v_adj = adj[v];
-            for (int j = i + 1; j < cand_sz; ++j) {
-                int u = cand[j];
-                bool is_connected = v_adj.test(u);
-                nc[nc_sz] = u;
-                nc_sz += is_connected; 
-            }
+            // THE MAGIC: Generate all valid next candidates in ONE clock cycle
+            bitset<MAXN> nc = cand & adj[v];
             
             cur.push_back(v);
             if (pc + nodes[v].profit > Pmax)
                 worker_update_pmax(pc + nodes[v].profit, cur);
-            findClique(nc, nc_sz, cur, pc + nodes[v].profit, wc + nodes[v].cost);
+            
+            findClique(nc, cur, pc + nodes[v].profit, wc + nodes[v].cost);
             cur.pop_back();
         }
     }
 }
 
-// ── I/O ───────────────────────────────────────────────────────────────────────
-vector<int> read_and_broadcast(const char* path, int rank) {
-    int profits[MAXN] = {}, costs[MAXN] = {};
+// ── I/O and Re-Indexing ───────────────────────────────────────────────────────
+void read_and_broadcast(const char* path, int rank) {
+    struct OrigNode { int p, c, id; };
+    vector<OrigNode> tmp;
+    vector<pair<int, int>> edge_list;
 
     if (rank == 0) {
         FILE* f = fopen(path, "r");
-        if (!f) { fprintf(stderr, "Cannot open input file: %s\n", path); MPI_Abort(MPI_COMM_WORLD, 1); }
+        if (!f) { fprintf(stderr, "Error opening file\n"); MPI_Abort(MPI_COMM_WORLD, 1); }
         fscanf(f, "%d %d %d", &N, &E, &B);
-        for (int i = 0; i < N; i++)
-            fscanf(f, "%d %d", &profits[i], &costs[i]);
+        
+        tmp.resize(N);
+        for (int i = 0; i < N; i++) {
+            fscanf(f, "%d %d", &tmp[i].p, &tmp[i].c);
+            tmp[i].id = i;
+        }
+        
+        edge_list.resize(E);
         for (int i = 0; i < E; i++) {
-            int u, v;
-            fscanf(f, "%d %d", &u, &v);
+            fscanf(f, "%d %d", &edge_list[i].first, &edge_list[i].second);
+        }
+        fclose(f);
+
+        // Sort by Ratio (Best to Worst)
+        sort(tmp.begin(), tmp.end(), [](const OrigNode& a, const OrigNode& b) {
+            return (double)a.p / a.c > (double)b.p / b.c;
+        });
+
+        // RE-INDEX THE GRAPH
+        vector<int> orig_to_new(MAXN);
+        for (int i = 0; i < N; i++) {
+            nodes[i].profit = tmp[i].p;
+            nodes[i].cost = tmp[i].c;
+            nodes[i].index = tmp[i].id; // Save original ID
+            orig_to_new[tmp[i].id] = i;
+        }
+
+        // Build Adjacency Matrix using NEW indices
+        for (auto& e : edge_list) {
+            int u = orig_to_new[e.first];
+            int v = orig_to_new[e.second];
             adj[u].set(v);
             adj[v].set(u);
         }
-        fclose(f);
     }
 
-    int hdr[3] = {N, E, B};
-    MPI_Bcast(hdr, 3, MPI_INT, 0, MPI_COMM_WORLD);
-    N = hdr[0]; E = hdr[1]; B = hdr[2];
-
-    MPI_Bcast(profits, N, MPI_INT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(costs, N, MPI_INT, 0, MPI_COMM_WORLD);
-    MPI_Bcast(adj, N * sizeof(adj[0]), MPI_BYTE, 0, MPI_COMM_WORLD);
-
-    vector<Node> tmp(N);
-    for (int i = 0; i < N; i++) {
-        tmp[i] = {profits[i], costs[i], i};
-    }
-    
-    // POPULATE PROFIT RANKS
-    vector<Node> tmp_rank = tmp;
-    sort(tmp_rank.begin(), tmp_rank.end(), [](const Node& a, const Node& b) {
-        if (a.profit != b.profit) return a.profit > b.profit;
-        return a.index < b.index;
-    });
-    for (int i = 0; i < N; i++) {
-        profit_rank[tmp_rank[i].index] = i; 
-    }
-
-    sort(tmp.begin(), tmp.end(), ratio_cmp);
-    vector<int> cand;
-    for (int i = 0; i < N; i++) {
-        nodes[tmp[i].index] = tmp[i];
-        cand.push_back(tmp[i].index);
-    }
-    return cand;
-}
-
-static void build_sub(int root, const vector<int>& initial_cand, int* sub, int& sub_sz) {
-    sub_sz = 0;
-    const auto& root_adj = adj[root];
-    for (int u : initial_cand) {
-        if (u == root) break;
-        // Fast Neighbor Collection
-        bool is_connected = root_adj.test(u);
-        sub[sub_sz] = u;
-        sub_sz += is_connected;
-    }
+    MPI_Bcast(&N, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&E, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&B, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(nodes, N * sizeof(Node), MPI_BYTE, 0, MPI_COMM_WORLD);
+    MPI_Bcast(adj, MAXN * sizeof(adj[0]), MPI_BYTE, 0, MPI_COMM_WORLD);
 }
 
 void write_output(const char* path) {
-    sort(best_clique.begin(), best_clique.end());
+    // Map the internal optimal clique back to original node IDs
+    vector<int> original_clique;
+    for (int id : best_clique) {
+        original_clique.push_back(nodes[id].index);
+    }
+    sort(original_clique.begin(), original_clique.end());
+    
     ofstream out(path);
     out << Pmax << '\n';
-    for (int id : best_clique) out << id << ' ';
+    for (int id : original_clique) out << id << ' ';
     out << '\n';
 }
 
@@ -244,24 +231,26 @@ int main(int argc, char** argv) {
         return -1;
     }
 
-    vector<int> initial_cand = read_and_broadcast(argv[1], rank);
+    read_and_broadcast(argv[1], rank);
 
     if (size == 1) {
-        int sub[MAXN], sub_sz;
-        for (int root : initial_cand) {
+        for (int root = 0; root < N; ++root) {
             int pc = nodes[root].profit, wc = nodes[root].cost;
-            build_sub(root, initial_cand, sub, sub_sz);
+            bitset<MAXN> sub;
+            // Only add valid neighbors that occur AFTER root in sorted order
+            for (int u = root + 1; u < N; ++u) {
+                if (adj[root].test(u)) sub.set(u);
+            }
+            
             if (pc > Pmax) worker_update_pmax(pc, {root});
             vector<int> cur = {root};
-            findClique(sub, sub_sz, cur, pc, wc);
+            findClique(sub, cur, pc, wc);
         }
         write_output(argv[2]);
         fprintf(stderr, "Time: %.3f s\n", MPI_Wtime() - t0);
         MPI_Finalize();
         return 0;
     }
-
-    int total = (int)initial_cand.size();
 
     // ── MASTER (rank 0) ───────────────────────────────────────────────────────
     if (rank == 0) {
@@ -270,15 +259,15 @@ int main(int argc, char** argv) {
         int wbuf[WORK_BUF], rbuf[RES_BUF];
         set<int> active_set;
 
-        auto send_task = [&](int w, int ti) {
+        auto send_task = [&](int w, int root_idx) {
             wbuf[0] = Pmax;
-            wbuf[1] = initial_cand[ti];
+            wbuf[1] = root_idx;
             MPI_Send(wbuf, WORK_BUF, MPI_INT, w, TAG_WORK, MPI_COMM_WORLD);
             active_set.insert(w);
         };
 
         for (int w = 1; w <= workers; w++) {
-            if (sent < total) {
+            if (sent < N) {
                 send_task(w, sent++);
                 active++;
             } else {
@@ -306,6 +295,7 @@ int main(int argc, char** argv) {
             int wpmax = rbuf[0], csz = rbuf[1];
             int old_pmax = Pmax;
             if (wpmax > Pmax) Pmax = wpmax;
+            
             if (csz > 0 && wpmax == Pmax) {
                 best_clique.assign(rbuf + 2, rbuf + 2 + csz);
             }
@@ -318,7 +308,7 @@ int main(int argc, char** argv) {
             active--;
             active_set.erase(w);
 
-            if (sent < total) {
+            if (sent < N) {
                 send_task(w, sent++);
                 active++;
             } else {
@@ -347,12 +337,15 @@ int main(int argc, char** argv) {
             Pmax = max(Pmax, wbuf[0]);
             task_own_pmax = 0;   
             best_clique.clear();
+            
             int root = wbuf[1];
             int pc = nodes[root].profit;
             int wc = nodes[root].cost;
 
-            int sub[MAXN], sub_sz;
-            build_sub(root, initial_cand, sub, sub_sz);
+            bitset<MAXN> sub;
+            for (int u = root + 1; u < N; ++u) {
+                if (adj[root].test(u)) sub.set(u);
+            }
 
             if (pc > Pmax) {
                 worker_update_pmax(pc, {root});
@@ -360,7 +353,7 @@ int main(int argc, char** argv) {
 
             call_count = 0;
             vector<int> cur = {root};
-            findClique(sub, sub_sz, cur, pc, wc);
+            findClique(sub, cur, pc, wc);
 
             rbuf[0] = task_own_pmax;
             rbuf[1] = (int)best_clique.size();
