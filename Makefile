@@ -6,7 +6,7 @@ all: seq main
 seq: seq.cpp
 	$(CXX) $(CXXFLAGS) $< -o $@
 
-main: mpi.cpp
+main: kr.cpp
 	$(MPICXX) $(CXXFLAGS) $< -o $@
 
 clean:

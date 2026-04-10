@@ -56,7 +56,22 @@ void worker_update_pmax(int new_pmax, const vector<int>& clique) {
 }
 
 // ── Bounds ────────────────────────────────────────────────────────────────────
-int get_greedy_bound(const bitset<MAXN>& cand) {
+int ksbound(const bitset<MAXN>& cand, int rem) {
+    long long total = 0;
+    for (int v = cand._Find_first(); v < cand.size(); v = cand._Find_next(v)) {
+        if (nodes[v].cost > rem) {
+            total += (1LL * nodes[v].profit * rem) / nodes[v].cost;
+            break;
+        } else {
+            total += nodes[v].profit;
+            rem -= nodes[v].cost;
+        }
+    }
+    return (int)total;
+}
+
+
+int greedybound(const bitset<MAXN>& cand) {
     if (cand.none()) return 0;
     
     // Extract remaining candidates to sort them by absolute profit
@@ -76,17 +91,15 @@ int get_greedy_bound(const bitset<MAXN>& cand) {
         int u = sorted_cand[i];
         int c = 0;
         
-        while (forbidden_colors[c].test(u)) {
-            c++;
-        }
+        while (forbidden_colors[c].test(u)) c++;
         
-        forbidden_colors[c] |= adj[u];
+        forbidden_colors[c] =  forbidden_colors[c] | adj[u];
         
-        if (c > max_c) {
+        if (c <= max_c) {
+            color_max_p[c] = max(color_max_p[c], nodes[u].profit);
+        } else {
             max_c = c;
             color_max_p[c] = nodes[u].profit;
-        } else {
-            color_max_p[c] = max(color_max_p[c], nodes[u].profit);
         }
     }
     
@@ -100,22 +113,6 @@ int get_greedy_bound(const bitset<MAXN>& cand) {
     return bound;
 }
 
-int get_knapsack_bound(const bitset<MAXN>& cand, int rem) {
-    long long total = 0;
-    // Because the graph is re-indexed, _Find_first() naturally iterates 
-    // from Best Ratio -> Worst Ratio. Exactly what Knapsack needs!
-    for (int v = cand._Find_first(); v < cand.size(); v = cand._Find_next(v)) {
-        if (nodes[v].cost <= rem) {
-            total += nodes[v].profit;
-            rem -= nodes[v].cost;
-        } else {
-            total += (1LL * nodes[v].profit * rem) / nodes[v].cost;
-            break;
-        }
-    }
-    return (int)total;
-}
-
 // ── Branch and Bound ──────────────────────────────────────────────────────────
 // Pass 'cand' by value so we can mutate it locally without affecting backtracking
 void findClique(bitset<MAXN> cand, vector<int>& cur, int pc, int wc) {
@@ -127,8 +124,8 @@ void findClique(bitset<MAXN> cand, vector<int>& cur, int pc, int wc) {
         return;
     }
     
-    if (pc + get_greedy_bound(cand) <= Pmax) return;
-    if (pc + get_knapsack_bound(cand, B - wc) <= Pmax) return;
+    if (pc + greedybound(cand) <= Pmax) return;
+    if (pc + ksbound(cand, B - wc) <= Pmax) return;
 
     // GCC Hardware intrinsics to instantly jump to the next set bit (best ratio first)
     for (int v = cand._Find_first(); v < cand.size(); v = cand._Find_next(v)) {
@@ -247,7 +244,7 @@ int main(int argc, char** argv) {
             findClique(sub, cur, pc, wc);
         }
         write_output(argv[2]);
-        fprintf(stderr, "Time: %.3f s\n", MPI_Wtime() - t0);
+        fprintf(stderr, "MPI Time: %.3f s\n", MPI_Wtime() - t0);
         MPI_Finalize();
         return 0;
     }
