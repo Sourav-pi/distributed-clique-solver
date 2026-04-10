@@ -25,7 +25,7 @@ import sys
 
 def main():
     if len(sys.argv) < 6:
-        print(__doc__)
+        # print(__doc__)
         sys.exit(1)
 
     n       = int(sys.argv[1])

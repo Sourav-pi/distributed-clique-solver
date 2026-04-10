@@ -31,9 +31,12 @@ vector<int> best_clique;
 int color_max_p[MAXN];
 bitset<MAXN> forbidden_colors[MAXN]; 
 
+// FAST CACHE OPTIMIZATION: Flat integer array for O(1) rank lookups
+int profit_rank[MAXN];
+
 static int call_count = 0;
 static bool is_worker = false;
-static int task_own_pmax = 0;  // best profit found by THIS worker itself, not adopted from broadcasts
+static int task_own_pmax = 0;  
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 bool ratio_cmp(const Node& a, const Node& b) {
@@ -53,10 +56,9 @@ void drain_pmax_updates() {
 
 void worker_update_pmax(int new_pmax, const vector<int>& clique) {
     Pmax = new_pmax;
-    task_own_pmax = new_pmax;  // record that WE found this, not a broadcast
+    task_own_pmax = new_pmax;  
     best_clique = clique;
     if (is_worker) {
-        // Only send the bound — clique is delivered with TAG_RESULT when the task finishes
         MPI_Send(&Pmax, 1, MPI_INT, 0, TAG_UPDATE_PMAX, MPI_COMM_WORLD);
     }
 }
@@ -68,10 +70,9 @@ int get_greedy_bound(const int* cand, int cand_sz) {
     int sorted_cand[MAXN];
     memcpy(sorted_cand, cand, cand_sz * sizeof(int));
     
+    // CACHE OPTIMIZATION: Sort using the L1-friendly integer array
     sort(sorted_cand, sorted_cand + cand_sz, [](int a, int b) {
-        if (nodes[a].profit != nodes[b].profit)
-            return nodes[a].profit > nodes[b].profit;
-        return a < b; 
+        return profit_rank[a] < profit_rank[b];
     });
 
     int max_c = -1; 
@@ -80,7 +81,6 @@ int get_greedy_bound(const int* cand, int cand_sz) {
         int u = sorted_cand[i];
         int c = 0;
         
-
         while (forbidden_colors[c].test(u)) {
             c++;
         }
@@ -99,7 +99,7 @@ int get_greedy_bound(const int* cand, int cand_sz) {
     for (int c = 0; c <= max_c; ++c) {
         bound += color_max_p[c];
         color_max_p[c] = 0;       
-        forbidden_colors[c].reset(); // Clean up fast
+        forbidden_colors[c].reset(); 
     }
     
     return bound;
@@ -131,6 +131,8 @@ void findClique(const int* cand, int cand_sz, vector<int>& cur, int pc, int wc) 
         }
         return;
     }
+    
+    // Original required ordering: Greedy, then Knapsack
     if (pc + get_greedy_bound(cand, cand_sz) <= Pmax) return;
     if (pc + get_knapsack_bound(cand, cand_sz, B - wc) <= Pmax) return;
 
@@ -138,9 +140,16 @@ void findClique(const int* cand, int cand_sz, vector<int>& cur, int pc, int wc) 
         int v = cand[i];
         if (wc + nodes[v].cost <= B) {
             int nc[MAXN], nc_sz = 0;
+            
+            // Fast Neighbor Collection
+            const auto& v_adj = adj[v];
             for (int j = i + 1; j < cand_sz; ++j) {
-                if (adj[v].test(cand[j])) nc[nc_sz++] = cand[j];
+                int u = cand[j];
+                bool is_connected = v_adj.test(u);
+                nc[nc_sz] = u;
+                nc_sz += is_connected; 
             }
+            
             cur.push_back(v);
             if (pc + nodes[v].profit > Pmax)
                 worker_update_pmax(pc + nodes[v].profit, cur);
@@ -181,6 +190,17 @@ vector<int> read_and_broadcast(const char* path, int rank) {
     for (int i = 0; i < N; i++) {
         tmp[i] = {profits[i], costs[i], i};
     }
+    
+    // POPULATE PROFIT RANKS
+    vector<Node> tmp_rank = tmp;
+    sort(tmp_rank.begin(), tmp_rank.end(), [](const Node& a, const Node& b) {
+        if (a.profit != b.profit) return a.profit > b.profit;
+        return a.index < b.index;
+    });
+    for (int i = 0; i < N; i++) {
+        profit_rank[tmp_rank[i].index] = i; 
+    }
+
     sort(tmp.begin(), tmp.end(), ratio_cmp);
     vector<int> cand;
     for (int i = 0; i < N; i++) {
@@ -192,9 +212,13 @@ vector<int> read_and_broadcast(const char* path, int rank) {
 
 static void build_sub(int root, const vector<int>& initial_cand, int* sub, int& sub_sz) {
     sub_sz = 0;
+    const auto& root_adj = adj[root];
     for (int u : initial_cand) {
         if (u == root) break;
-        if (adj[root].test(u)) sub[sub_sz++] = u;
+        // Fast Neighbor Collection
+        bool is_connected = root_adj.test(u);
+        sub[sub_sz] = u;
+        sub_sz += is_connected;
     }
 }
 
@@ -269,7 +293,6 @@ int main(int argc, char** argv) {
             int w = st.MPI_SOURCE;
 
             if (st.MPI_TAG == TAG_UPDATE_PMAX) {
-                // Live bound update: only Pmax, no clique — just tighten the bound
                 int wpmax = rbuf[0];
                 if (wpmax > Pmax) {
                     Pmax = wpmax;
@@ -277,14 +300,12 @@ int main(int argc, char** argv) {
                         if (aw != w) MPI_Send(&Pmax, 1, MPI_INT, aw, TAG_PMAX, MPI_COMM_WORLD);
                     }
                 }
-                continue; // worker is still running, don't assign new work
+                continue; 
             }
 
-            // TAG_RESULT: worker finished its task and sends its final Pmax + clique
             int wpmax = rbuf[0], csz = rbuf[1];
             int old_pmax = Pmax;
             if (wpmax > Pmax) Pmax = wpmax;
-            // Update best_clique only when this result carries a valid clique at the best known profit
             if (csz > 0 && wpmax == Pmax) {
                 best_clique.assign(rbuf + 2, rbuf + 2 + csz);
             }
@@ -307,7 +328,7 @@ int main(int argc, char** argv) {
 
         write_output(argv[2]);
         
-        // ── WORKER (rank > 0) ─────────────────────────────────────────────────────
+    // ── WORKER (rank > 0) ─────────────────────────────────────────────────────
     } else {
         is_worker = true;
         int wbuf[WORK_BUF], rbuf[RES_BUF];
@@ -324,7 +345,7 @@ int main(int argc, char** argv) {
             }
             
             Pmax = max(Pmax, wbuf[0]);
-            task_own_pmax = 0;   // reset: only count what this task finds itself
+            task_own_pmax = 0;   
             best_clique.clear();
             int root = wbuf[1];
             int pc = nodes[root].profit;
@@ -341,7 +362,6 @@ int main(int argc, char** argv) {
             vector<int> cur = {root};
             findClique(sub, sub_sz, cur, pc, wc);
 
-            // Send task_own_pmax (not broadcast-inflated Pmax) so master can match clique to profit
             rbuf[0] = task_own_pmax;
             rbuf[1] = (int)best_clique.size();
             for (int i = 0; i < (int)best_clique.size(); i++)
