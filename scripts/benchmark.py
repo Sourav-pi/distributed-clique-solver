@@ -87,7 +87,7 @@ def main():
                               mpi1_efficiency=(mpi1/elapsed)/p if implementation == 'mpi' else ''))
     for name, records in [('trials.csv', rows), ('summary.csv', summaries)]:
         with (args.output_dir/name).open('w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=list(records[0]))
+            writer = csv.DictWriter(f, fieldnames=list(records[0]), lineterminator='\n')
             writer.writeheader()
             writer.writerows(records)
     metadata = dict(timestamp_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),

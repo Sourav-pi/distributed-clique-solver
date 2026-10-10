@@ -1,16 +1,22 @@
 #include "solver.hpp"
 #include <mpi.h>
+#include <functional>
 
-const int TAG_WORK        = 1;  
-const int TAG_RESULT      = 2;  
-const int TAG_DONE        = 3;  
-const int TAG_PMAX        = 4;  
-const int TAG_UPDATE_PMAX = 5;  
+const int TAG_WORK        = 1;
+const int TAG_RESULT      = 2;
+const int TAG_DONE        = 3;
+const int TAG_PMAX        = 4;
+const int TAG_UPDATE_PMAX = 5;
 
 
 
 const int WORK_BUF = 2;
-const int RES_BUF  = 2 + MAXN;  
+const int RES_BUF  = 2 + MAXN;
+
+static function<void()> coordinator_progress;
+static function<void()> coordinator_notify;
+void poll_coordinator() { coordinator_progress(); }
+void notify_coordinator() { coordinator_notify(); }
 
 void drain_pmax_updates() {
     int flag, np;
@@ -63,56 +69,79 @@ int main(int argc, char** argv) {
 
     // ── MASTER (rank 0) ───────────────────────────────────────────────────────
     if (rank == 0) {
+        struct Task { int root; };
+        vector<Task> tasks;
+        // Omit infeasible roots and roots without any feasible extension.
+        // Singleton solutions are retained by the coordinator.
+        for (int root = 0; root < N; ++root) {
+            if (nodes[root].cost > B) continue;
+            if (nodes[root].profit > Pmax) {
+                Pmax = nodes[root].profit;
+                best_clique = {root};
+            }
+            vector<int> extensions;
+            for (int u = root + 1; u < N; ++u)
+                if (adj[root].test(u) && nodes[root].cost + nodes[u].cost <= B)
+                    extensions.push_back(u);
+            if (extensions.empty()) continue;
+            tasks.push_back({root});
+        }
         int sent = 0, active = 0;
         int workers = size - 1;
         int wbuf[WORK_BUF], rbuf[RES_BUF];
         set<int> active_set;
-        // Stable per-send buffers prevent cyclic blocking and buffer reuse races.
-        struct PendingUpdate { int value; MPI_Request request; };
-        list<PendingUpdate> pending;
-        auto send_bound = [&](int worker) {
-            for (auto it = pending.begin(); it != pending.end();) {
-                int complete = 0;
-                MPI_Test(&it->request, &complete, MPI_STATUS_IGNORE);
-                if (complete) it = pending.erase(it); else ++it;
+        // At most one update in flight per worker; newer bounds are coalesced.
+        struct BoundChannel {
+            int value = 0;
+            MPI_Request request = MPI_REQUEST_NULL;
+        };
+        vector<BoundChannel> channels(size);
+        auto flush_bounds = [&]() {
+            for (int worker : active_set) {
+                auto& channel = channels[worker];
+                if (channel.request != MPI_REQUEST_NULL) {
+                    int complete = 0;
+                    MPI_Test(&channel.request, &complete, MPI_STATUS_IGNORE);
+                    if (!complete) continue;
+                }
+                if (channel.value < Pmax) {
+                    channel.value = Pmax;
+                    MPI_Isend(&channel.value, 1, MPI_INT, worker, TAG_PMAX,
+                              MPI_COMM_WORLD, &channel.request);
+                }
             }
-            pending.push_back({Pmax, MPI_REQUEST_NULL});
-            auto& update = pending.back();
-            MPI_Isend(&update.value, 1, MPI_INT, worker, TAG_PMAX,
-                      MPI_COMM_WORLD, &update.request);
         };
 
-        auto send_task = [&](int w, int root_idx) {
+        auto send_task = [&](int w, const Task& task) {
             wbuf[0] = Pmax;
-            wbuf[1] = root_idx;
+            wbuf[1] = task.root;
             MPI_Send(wbuf, WORK_BUF, MPI_INT, w, TAG_WORK, MPI_COMM_WORLD);
             active_set.insert(w);
         };
 
         for (int w = 1; w <= workers; w++) {
-            if (sent < N) {
-                send_task(w, sent++);
+            if (sent < static_cast<int>(tasks.size())) {
+                send_task(w, tasks[sent++]);
                 active++;
             } else {
                 MPI_Send(nullptr, 0, MPI_INT, w, TAG_DONE, MPI_COMM_WORLD);
             }
         }
 
-        while (active > 0) {
+        auto receive_message = [&]() {
             MPI_Status st;
             MPI_Recv(rbuf, RES_BUF, MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &st);
 
             int w = st.MPI_SOURCE;
+            flush_bounds();
 
             if (st.MPI_TAG == TAG_UPDATE_PMAX) {
                 int wpmax = rbuf[0];
                 if (wpmax > Pmax) {
                     Pmax = wpmax;
-                    for (int aw : active_set) {
-                        if (aw != w) send_bound(aw);
-                    }
+                    flush_bounds();
                 }
-                continue; 
+                return;
             }
 
             int wpmax = rbuf[0], csz = rbuf[1];
@@ -123,23 +152,56 @@ int main(int argc, char** argv) {
                 best_clique.assign(rbuf + 2, rbuf + 2 + csz);
             }
             if (Pmax > old_pmax) {
-                for (int aw : active_set) {
-                    if (aw != w) send_bound(aw);
-                }
+                flush_bounds();
             }
 
             active--;
             active_set.erase(w);
 
-            if (sent < N) {
-                send_task(w, sent++);
+            if (sent < static_cast<int>(tasks.size())) {
+                send_task(w, tasks[sent++]);
                 active++;
             } else {
                 MPI_Send(nullptr, 0, MPI_INT, w, TAG_DONE, MPI_COMM_WORLD);
             }
-        }
+        };
 
-        for (auto& update : pending) MPI_Wait(&update.request, MPI_STATUS_IGNORE);
+        auto progress = [&]() {
+            int available = 0;
+            do {
+                MPI_Iprobe(MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD,
+                           &available, MPI_STATUS_IGNORE);
+                if (available) receive_message();
+            } while (available);
+            flush_bounds();
+        };
+        coordinator_progress = progress;
+        coordinator_notify = flush_bounds;
+        is_worker = true;
+        poll_updates = poll_coordinator;
+        report_improvement = notify_coordinator;
+        // Rank 0 searches while servicing messages at recursive polling points.
+        while (sent < static_cast<int>(tasks.size()) || active > 0) {
+            progress();
+            if (sent < static_cast<int>(tasks.size())) {
+                int root = tasks[sent++].root;
+                bitset<MAXN> sub;
+                for (int u = root + 1; u < N; ++u)
+                    if (adj[root].test(u)) sub.set(u);
+                vector<int> cur{root};
+                call_count = 0;
+                findClique(sub, cur, nodes[root].profit, nodes[root].cost);
+            } else if (active > 0) {
+                receive_message();
+            }
+        }
+        is_worker = false;
+        coordinator_progress = {};
+        coordinator_notify = {};
+
+        for (auto& channel : channels)
+            if (channel.request != MPI_REQUEST_NULL)
+                MPI_Wait(&channel.request, MPI_STATUS_IGNORE);
         fprintf(stderr, "Search seconds: %.6f\n", MPI_Wtime() - search_start);
         write_output(argv[2]);
         
@@ -153,7 +215,7 @@ int main(int argc, char** argv) {
         while (true) {
             MPI_Status st;
             MPI_Recv(wbuf, WORK_BUF, MPI_INT, 0, MPI_ANY_TAG, MPI_COMM_WORLD, &st);
-            
+
             if (st.MPI_TAG == TAG_DONE) break;
             
             if (st.MPI_TAG == TAG_PMAX) {
@@ -162,7 +224,7 @@ int main(int argc, char** argv) {
             }
             
             Pmax = max(Pmax, wbuf[0]);
-            task_own_pmax = 0;   
+            task_own_pmax = 0;
             best_clique.clear();
             
             int root = wbuf[1];

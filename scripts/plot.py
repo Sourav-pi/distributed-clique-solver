@@ -30,7 +30,7 @@ for ax in axes:
     ax.set_xlabel('Total MPI ranks (P)')
     ax.set_xticks(p)
     ax.grid(alpha=.25)
-fig.suptitle('End-to-end timings; rank 0 coordinates when P > 1')
+fig.suptitle('End-to-end timings; rank 0 coordinates and searches when P > 1')
 fig.tight_layout()
 args.output.parent.mkdir(parents=True, exist_ok=True)
 fig.savefig(args.output, dpi=180)

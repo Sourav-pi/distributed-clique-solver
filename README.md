@@ -24,7 +24,7 @@ Use `make sequential` if MPI is unavailable, and `make mpi` to build only the di
 
 ## Search and distribution
 
-Both executables share the search engine in [src/solver.hpp](src/solver.hpp). It uses fixed arrays, bitset candidates, ratio ordering, greedy coloring, fractional-knapsack bounds, and root traversal. The sequential runner and MPI with one rank both call the same `solve_all()` function. MPI communication is provided through worker-only hooks; the sequential executable has no MPI dependency.
+Both executables share the search engine in [src/solver.hpp](src/solver.hpp). It uses fixed arrays, bitset candidates, ratio ordering, greedy coloring, fractional-knapsack bounds, and root traversal. The sequential runner and MPI with one rank both call the same `solve_all()` function. MPI communication is provided through hooks on searching ranks; the sequential executable has no MPI dependency.
 
 Vertices are sorted by descending profit-to-cost ratio using exact integer cross-products, with input vertex IDs retained for output. Adjacency is stored in fixed-width 1,201-bit bitsets with at most 1,200 valid vertices. Candidate intersections enforce the clique condition, while removing each explored vertex prevents duplicate branches.
 
@@ -35,7 +35,7 @@ Two upper bounds prune search:
 
 Every feasible search prefix updates the incumbent before pruning. A subtree begins with one vertex and permits only later vertices, so each nonempty clique belongs to exactly one root task.
 
-With `P > 1`, MPI rank 0 reads and broadcasts the graph, dispatches root tasks dynamically, and retains the best result. The other `P - 1` ranks search subtrees. Each dispatch includes the current incumbent. Workers report improved profits during recursion and periodically poll for coordinator updates; completed tasks return their locally discovered profit and vertex set. Coordinator updates use nonblocking sends with stable buffers to avoid cyclic blocking. The graph broadcast uses raw struct/bitset data and assumes compatible binaries and object layouts across ranks. With one rank, MPI calls the same local search as the sequential executable.
+With `P > 1`, MPI rank 0 reads and broadcasts the graph, dispatches root tasks dynamically, and retains the best result. Rank 0 also searches unassigned root subtrees and services messages at recursive polling points, so all `P` ranks can contribute search work. Each dispatch includes the current incumbent. Workers report improved profits during recursion and periodically poll for coordinator updates; completed tasks return their locally discovered profit and vertex set. Coordinator updates use a stable per-worker buffer and at most one nonblocking send in flight per worker; newer bounds are coalesced until the buffer is free. Infeasible roots and roots without a feasible extension are omitted after recording their singleton solutions. The graph broadcast uses raw struct/bitset data and assumes compatible binaries and object layouts across ranks. With one rank, MPI calls the same local search as the sequential executable.
 
 ```mermaid
 flowchart LR
@@ -101,7 +101,7 @@ The benchmark uses Python subprocess wall time, including process launch, MPI in
 
 Artifacts include raw trial timings, medians, output solutions, input hash, binary hashes, generation metadata when supplied, platform and CPU information, compiler/MPI versions, commands, Git revision and worktree status. Build flags are controlled by the Makefile; record overrides separately when changing them. Use multiple graph sizes, densities, seeds, and budgets for a broader study. Keep process counts within allocated resources, or explicitly pass `--mpi-flags='--oversubscribe'` for a local experiment.
 
-`sequential_speedup = T_seq / T_MPI(P)` compares the executables. `mpi1_speedup = T_MPI(1) / T_MPI(P)` measures MPI scaling. `mpi1_efficiency = mpi1_speedup / P` counts all ranks, including the coordinator. Sequential and one-rank MPI use the identical search function. End-to-end MPI timings still include launch and initialization overhead; parallel scheduling and incumbent arrival order can affect search work. Use the MPI-one-rank baseline to assess MPI scaling; scheduling, incumbent communication, graph distribution, and the dedicated coordinator still affect it.
+`sequential_speedup = T_seq / T_MPI(P)` compares the executables. `mpi1_speedup = T_MPI(1) / T_MPI(P)` measures MPI scaling. `mpi1_efficiency = mpi1_speedup / P` counts all ranks, including the coordinator. Sequential and one-rank MPI use the identical search function. End-to-end MPI timings still include launch and initialization overhead; parallel scheduling and incumbent arrival order can affect search work. Use the MPI-one-rank baseline to assess MPI scaling; scheduling, incumbent communication, graph distribution, and coordinator message servicing still affect it.
 
 The measured [sequential-versus-MPI benchmark](benchmarks/seq-vs-mpi/README.md) compares sequential and MPI execution of the shared search engine. Raw trials, environment metadata, validated outputs, and a scaling chart are included. Results describe this workload and machine; use multiple graphs and machines before drawing general conclusions.
 

@@ -77,6 +77,22 @@ class Correctness(unittest.TestCase):
             self.assertEqual(run.returncode, 0, run.stderr)
             self.assertEqual(validate(graph, output), 2)
 
+    def test_complete_graph_with_many_candidates(self):
+        # Exercise a large feasible clique and coordinator-held witnesses.
+        source, output = self.folder/'split.txt', self.folder/'out.txt'
+        n = 64
+        source.write_text(f'{n} {n*(n-1)//2} {n}\n' + '1 1\n'*n +
+                          ''.join(f'{u} {v}\n' for u in range(n) for v in range(u+1,n)))
+        graph = read_graph(source)
+        commands = [[str(ROOT/'build/clique-seq')]]
+        if not ARGS.sequential_only:
+            commands += [['mpirun'] + shlex.split(ARGS.mpi_flags) +
+                         ['-np', str(p), str(ROOT/'build/clique-mpi')] for p in [4, 8]]
+        for command in commands:
+            run = subprocess.run(command+[str(source),str(output)], capture_output=True, text=True, timeout=30)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(validate(graph, output), n)
+
     def test_invalid_inputs_fail(self):
         invalid = ['3 0 1\n1000000000 1\n1000000000 1\n1000000000 1\n', '1201 0 0\n', '1 0 -1\n1 1\n', '1 0 1\n1 0\n',
                    '2 1 1\n1 1\n1 1\n0 2\n', '1 0 1\n',
