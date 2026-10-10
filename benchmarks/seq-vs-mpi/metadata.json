@@ -1,0 +1,83 @@
+{
+  "timestamp_utc": "2026-10-10T05:34:59Z",
+  "platform": "macOS-26.2-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "processor": "arm",
+  "cpu_count": 8,
+  "python": "3.13.3 (main, Apr  8 2025, 13:54:08) [Clang 16.0.0 (clang-1600.0.26.6)]",
+  "hardware": "Apple M1",
+  "source_sha256": {
+    "src/mpi.cpp": "2095c8c9d92ff634150602d3aa76940ebd1b0b4e0f93cf3fda86b6d36a49671a",
+    "src/seq.cpp": "d1438f39b4eb4b907b02a0302eead842932f28f140bd903eba63e4e37dc02519",
+    "src/solver.hpp": "83f1a451fcdabd5cb47b8cdc2c0d7cbf3e5a3e03a35f7e42866be4f823869ce3"
+  },
+  "makefile_sha256": "4e533bbbbfc5fbf8236151a2fdf14b12a5c85f0dc8447c7118bef40db688aae8",
+  "compiler": "Apple clang version 17.0.0 (clang-1700.3.19.1)\nTarget: arm64-apple-darwin25.2.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin",
+  "mpi_compiler": "clang++ -I/opt/homebrew/Cellar/open-mpi/5.0.9/include -L/opt/homebrew/Cellar/open-mpi/5.0.9/lib -lmpi",
+  "mpi": "mpirun (Open MPI) 5.0.9\n\nReport bugs to https://www.open-mpi.org/community/help/",
+  "git_revision": "e841c5b70037189a44abc3e482dd84e539702e46",
+  "input": "benchmarks/seq-vs-mpi/input.txt",
+  "input_sha256": "da6a06ceae45679b3b7c2c903e233bf7bb538df2dc0ae9c417d6ebaca281312d",
+  "vertices": 400,
+  "edges": 39890,
+  "budget": 500,
+  "generation": {
+    "vertices": 400,
+    "density": 0.5,
+    "max_profit": 100,
+    "max_cost": 100,
+    "budget": 500,
+    "seed": 42,
+    "generator": "scripts/generate.py"
+  },
+  "repeats": 5,
+  "warmups": 1,
+  "commands": [
+    [
+      "build/clique-seq",
+      "benchmarks/seq-vs-mpi/input.txt",
+      "benchmarks/seq-vs-mpi/sequential-1.txt"
+    ],
+    [
+      "mpirun",
+      "--oversubscribe",
+      "-np",
+      "1",
+      "build/clique-mpi",
+      "benchmarks/seq-vs-mpi/input.txt",
+      "benchmarks/seq-vs-mpi/mpi-1.txt"
+    ],
+    [
+      "mpirun",
+      "--oversubscribe",
+      "-np",
+      "2",
+      "build/clique-mpi",
+      "benchmarks/seq-vs-mpi/input.txt",
+      "benchmarks/seq-vs-mpi/mpi-2.txt"
+    ],
+    [
+      "mpirun",
+      "--oversubscribe",
+      "-np",
+      "4",
+      "build/clique-mpi",
+      "benchmarks/seq-vs-mpi/input.txt",
+      "benchmarks/seq-vs-mpi/mpi-4.txt"
+    ],
+    [
+      "mpirun",
+      "--oversubscribe",
+      "-np",
+      "8",
+      "build/clique-mpi",
+      "benchmarks/seq-vs-mpi/input.txt",
+      "benchmarks/seq-vs-mpi/mpi-8.txt"
+    ]
+  ],
+  "timing_scope": "Python subprocess wall time: launch, MPI initialization, input, broadcast, search, output, finalization; excludes generation, build, validation.",
+  "optimality": "feasibility and agreement only",
+  "seq_binary_sha256": "2a419237ab15e3428c93e7331e6cbcfdaf724c3fd1927e5392f5ed87b2446ab5",
+  "mpi_binary_sha256": "c1e6f02d9ed079da4d53c7c694c694751d5839c83c418ad1e3ffa7f710251bfd",
+  "git_dirty": true
+}

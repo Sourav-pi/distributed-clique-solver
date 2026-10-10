@@ -1,0 +1,2 @@
+# Only required for plotting. Other scripts use the Python standard library.
+matplotlib>=3.7,<4

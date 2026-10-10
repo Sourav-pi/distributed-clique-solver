@@ -1,2 +1,8 @@
-*.txt
-*.csv
+.DS_Store
+.vscode/
+__pycache__/
+*.pyc
+build/
+benchmarks/local/
+.mplconfig/
+output_sequential.txt
